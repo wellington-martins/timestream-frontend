@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 // Set to your exact Render URL (no trailing slash)
-const SIGNALING_URL = "https://timestream-signal.onrender.com";
+const SIGNALING_URL = "https://timestream-backend.onrender.com";
 
 const ICE_SERVERS = {
   iceServers: [
