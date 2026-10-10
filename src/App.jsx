@@ -24,19 +24,42 @@ export default function App() {
 
   const startMedia = async () => {
     try {
+      // 1. Try standard camera + microphone
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
       localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       return stream;
-    } catch (err) {
-      console.error("Error accessing camera/mic:", err);
-      setStatus("Camera/Mic permission denied");
-      throw err;
+    } catch (primaryErr) {
+      console.warn("Camera/Mic not detected. Trying fallback stream...", primaryErr);
+
+      try {
+        // 2. Try mic-only if camera is missing
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        localStreamRef.current = audioStream;
+        return audioStream;
+      } catch (audioErr) {
+        console.warn("No mic found either. Creating synthetic video stream for PC...", audioErr);
+
+        // 3. Fallback: Generate a synthetic video track using an HTML Canvas
+        // This allows WebRTC to establish a connection without any physical camera hardware.
+        const canvas = document.createElement("canvas");
+        canvas.width = 320;
+        canvas.height = 240;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#161b22";
+        ctx.fillRect(0, 0, 320, 240);
+        ctx.fillStyle = "#58a6ff";
+        ctx.font = "16px sans-serif";
+        ctx.fillText("Desktop (No Webcam)", 60, 120);
+
+        const syntheticStream = canvas.captureStream(10); // 10 fps synthetic feed
+        localStreamRef.current = syntheticStream;
+        if (localVideoRef.current) localVideoRef.current.srcObject = syntheticStream;
+        return syntheticStream;
+      }
     }
   };
 
