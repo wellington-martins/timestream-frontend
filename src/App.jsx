@@ -1,7 +1,7 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import { io } from "socket.io-client";
 
-// Your active Render backend instance
+// Backend URL on Render
 const SIGNALING_URL = "https://timestream-backend.onrender.com";
 
 const ICE_SERVERS = {
@@ -11,18 +11,89 @@ const ICE_SERVERS = {
   ]
 };
 
+// Arbitrum One Network Details
+const ARBITRUM_CHAIN_ID = "0xa4b1"; // 42161 in decimal
+const ARBITRUM_PARAMS = {
+  chainId: ARBITRUM_CHAIN_ID,
+  chainName: "Arbitrum One",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://arb1.arbitrum.io/rpc"],
+  blockExplorerUrls: ["https://arbiscan.io/"]
+};
+
 export default function App() {
+  const [walletAddress, setWalletAddress] = useState(null);
+  const [networkError, setNetworkError] = useState("");
   const [roomId, setRoomId] = useState("room-test");
   const [joined, setJoined] = useState(false);
   const [status, setStatus] = useState("Disconnected");
+  
+  // Media controls
+  const [isAudioMuted, setIsAudioMuted] = useState(false);
+  const [isVideoMuted, setIsVideoMuted] = useState(false);
+
+  // Metering & call duration
+  const [callDuration, setCallDuration] = useState(0);
+  const [isCallActive, setIsCallActive] = useState(false);
 
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
+  const timerRef = useRef(null);
 
-  // Hardware check: handles both phones (with camera) and PC (no camera)
+  // Timer engine for metering
+  useEffect(() => {
+    if (isCallActive) {
+      timerRef.current = setInterval(() => {
+        setCallDuration((prev) => prev + 1);
+      }, 1000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [isCallActive]);
+
+  // Arbitrum / MetaMask connection
+  const connectWallet = async () => {
+    if (!window.ethereum) {
+      alert("MetaMask not found! Please install MetaMask or open inside MetaMask mobile browser.");
+      return;
+    }
+
+    try {
+      setNetworkError("");
+      const accounts = await window.ethereum.request({
+        method: "eth_requestAccounts"
+      });
+
+      // Check / Switch to Arbitrum One
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: ARBITRUM_CHAIN_ID }]
+        });
+      } catch (switchError) {
+        // Error 4902: chain has not been added to MetaMask
+        if (switchError.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [ARBITRUM_PARAMS]
+          });
+        } else {
+          throw switchError;
+        }
+      }
+
+      setWalletAddress(accounts[0]);
+    } catch (err) {
+      console.error(err);
+      setNetworkError(err.message || "Failed to connect wallet");
+    }
+  };
+
+  // Hardware check / Canvas fallback for headless desktop
   const startMedia = async () => {
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
@@ -38,7 +109,6 @@ export default function App() {
       }
     }
 
-    // Canvas fallback for PC viewer without webcam
     const canvas = document.createElement("canvas");
     canvas.width = 320;
     canvas.height = 240;
@@ -81,6 +151,11 @@ export default function App() {
 
     pc.oniceconnectionstatechange = () => {
       setStatus(`ICE State: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === "connected") {
+        setIsCallActive(true);
+      } else if (["disconnected", "failed", "closed"].includes(pc.iceConnectionState)) {
+        setIsCallActive(false);
+      }
     };
 
     peerConnectionRef.current = pc;
@@ -148,14 +223,83 @@ export default function App() {
     });
   };
 
+  const toggleAudio = () => {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsAudioMuted(!audioTrack.enabled);
+      }
+    }
+  };
+
+  const toggleVideo = () => {
+    if (localStreamRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setIsVideoMuted(!videoTrack.enabled);
+      }
+    }
+  };
+
+  const handleEndCall = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+    }
+    setIsCallActive(false);
+    setJoined(false);
+    setStatus("Call Ended");
+  };
+
+  const formatTimer = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  };
+
   return (
-    <div style={{ minHeight: "100vh", padding: "2rem", display: "flex", flexDirection: "column", alignItems: "center" }}>
-      <h1 style={{ marginBottom: "0.5rem" }}>TimeStream P2P Test</h1>
+    <div style={{ minHeight: "100vh", padding: "2rem", display: "flex", flexDirection: "column", alignItems: "center", background: "#0d1117", color: "#c9d1d9", fontFamily: "sans-serif" }}>
+      <h1 style={{ marginBottom: "0.5rem", color: "#fff" }}>TimeStream P2P + Arbitrum</h1>
+
+      {/* Web3 Wallet Header */}
+      <div style={{ marginBottom: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
+        {walletAddress ? (
+          <div style={{ padding: "8px 16px", background: "#161b22", borderRadius: "20px", border: "1px solid #30363d", display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ height: "10px", width: "10px", borderRadius: "50%", background: "#28a745" }}></span>
+            <span style={{ fontSize: "14px", color: "#58a6ff" }}>Arbitrum: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</span>
+          </div>
+        ) : (
+          <button
+            onClick={connectWallet}
+            style={{ padding: "10px 18px", borderRadius: "6px", background: "#28a745", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}
+          >
+            Connect Arbitrum Wallet
+          </button>
+        )}
+        {networkError && <p style={{ color: "#f85149", fontSize: "13px" }}>{networkError}</p>}
+      </div>
+
+      {/* Metering Bar */}
+      {isCallActive && (
+        <div style={{ marginBottom: "1rem", padding: "8px 20px", background: "#21262d", borderRadius: "6px", border: "1px solid #388bfd" }}>
+          Active Call Duration: <strong style={{ color: "#388bfd", fontSize: "18px" }}>{formatTimer(callDuration)}</strong>
+        </div>
+      )}
+
       <p style={{ color: "#8b949e", marginBottom: "1.5rem" }}>
         Status: <strong style={{ color: "#58a6ff" }}>{status}</strong>
       </p>
 
-      {!joined && (
+      {!joined ? (
         <div style={{ display: "flex", gap: "10px", marginBottom: "2rem" }}>
           <input
             type="text"
@@ -175,7 +319,7 @@ export default function App() {
             style={{
               padding: "10px 20px",
               borderRadius: "6px",
-              background: "#238636",
+              background: "#1f6feb",
               color: "#fff",
               border: "none",
               cursor: "pointer",
@@ -185,11 +329,23 @@ export default function App() {
             Enter Call
           </button>
         </div>
+      ) : (
+        <div style={{ display: "flex", gap: "10px", marginBottom: "2rem" }}>
+          <button onClick={toggleAudio} style={{ padding: "8px 16px", borderRadius: "6px", background: isAudioMuted ? "#da3633" : "#21262d", color: "#fff", border: "1px solid #30363d", cursor: "pointer" }}>
+            {isAudioMuted ? "Unmute Mic" : "Mute Mic"}
+          </button>
+          <button onClick={toggleVideo} style={{ padding: "8px 16px", borderRadius: "6px", background: isVideoMuted ? "#da3633" : "#21262d", color: "#fff", border: "1px solid #30363d", cursor: "pointer" }}>
+            {isVideoMuted ? "Enable Video" : "Disable Video"}
+          </button>
+          <button onClick={handleEndCall} style={{ padding: "8px 16px", borderRadius: "6px", background: "#da3633", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}>
+            End Call
+          </button>
+        </div>
       )}
 
       <div style={{ display: "flex", gap: "20px", flexWrap: "wrap", justifyContent: "center" }}>
         <div>
-          <h3 style={{ marginBottom: "8px" }}>Local Stream</h3>
+          <h3 style={{ marginBottom: "8px", fontSize: "14px" }}>Local Stream</h3>
           <video
             ref={localVideoRef}
             autoPlay
@@ -199,7 +355,7 @@ export default function App() {
           />
         </div>
         <div>
-          <h3 style={{ marginBottom: "8px" }}>Remote Video (Peer)</h3>
+          <h3 style={{ marginBottom: "8px", fontSize: "14px" }}>Remote Video (Peer)</h3>
           <video
             ref={remoteVideoRef}
             autoPlay
