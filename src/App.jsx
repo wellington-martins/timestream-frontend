@@ -1,8 +1,8 @@
 import React, { useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-// Update to your Render backend URL or custom domain
-const SIGNALING_URL = " https://timestream-backend.onrender.com";
+// Set to your exact Render URL (no trailing slash)
+const SIGNALING_URL = "https://timestream-signal.onrender.com";
 
 const ICE_SERVERS = {
   iceServers: [
@@ -22,21 +22,23 @@ export default function App() {
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
 
-  // Safe media getter that never hangs on PCs without cameras
+  // Hardware check: handles both phones (with camera) and PC (no camera)
   const startMedia = async () => {
-    // 1. Try physical webcam + mic
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
         localStreamRef.current = stream;
         if (localVideoRef.current) localVideoRef.current.srcObject = stream;
         return stream;
       } catch (err) {
-        console.warn("No physical camera/mic detected or permission denied. Falling back to synthetic feed...", err);
+        console.warn("Camera/Mic not detected or denied. Using synthetic placeholder...", err);
       }
     }
 
-    // 2. Hardware fallback: generate an HTML5 Canvas video track so the PC can still run WebRTC
+    // Canvas fallback for PC viewer without webcam
     const canvas = document.createElement("canvas");
     canvas.width = 320;
     canvas.height = 240;
@@ -58,20 +60,16 @@ export default function App() {
 
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
-    // Attach local tracks (real or synthetic)
     if (stream) {
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
     }
 
-    // Attach remote stream when peer sends video
     pc.ontrack = (event) => {
-      console.log("Remote track received:", event.streams);
       if (remoteVideoRef.current && event.streams[0]) {
         remoteVideoRef.current.srcObject = event.streams[0];
       }
     };
 
-    // Forward ICE routing candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
         socketRef.current.emit("ice-candidate", {
@@ -82,7 +80,6 @@ export default function App() {
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log("ICE Connection State:", pc.iceConnectionState);
       setStatus(`ICE State: ${pc.iceConnectionState}`);
     };
 
@@ -98,9 +95,8 @@ export default function App() {
 
     setStatus("Connecting to signaling server...");
     const socket = io(SIGNALING_URL, {
-  transports: ["polling", "websocket"],
-  secure: true
-});
+      transports: ["polling", "websocket"]
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -113,16 +109,14 @@ export default function App() {
       setStatus(`Relay connection failed: ${err.message}`);
     });
 
-    // Initiator flow: when another device joins, send offer
     socket.on("user-joined", async () => {
-      setStatus("Peer joined. Creating offer...");
+      setStatus("Peer detected. Creating offer...");
       const pc = getOrCreatePeerConnection(stream);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit("offer", { roomId, offer });
     });
 
-    // Receiver flow: create answer when receiving offer
     socket.on("offer", async ({ offer }) => {
       setStatus("Offer received. Answering...");
       const pc = getOrCreatePeerConnection(stream);
@@ -132,7 +126,6 @@ export default function App() {
       socket.emit("answer", { roomId, answer });
     });
 
-    // Complete negotiation
     socket.on("answer", async ({ answer }) => {
       setStatus("Answer received. P2P established!");
       if (peerConnectionRef.current) {
@@ -142,7 +135,6 @@ export default function App() {
       }
     });
 
-    // Handle ICE candidates
     socket.on("ice-candidate", async ({ candidate }) => {
       if (peerConnectionRef.current) {
         try {
@@ -150,7 +142,7 @@ export default function App() {
             new RTCIceCandidate(candidate)
           );
         } catch (e) {
-          console.error("ICE error:", e);
+          console.error("ICE Candidate Error:", e);
         }
       }
     });
