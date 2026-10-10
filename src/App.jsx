@@ -97,7 +97,10 @@ export default function App() {
     const stream = await startMedia();
 
     setStatus("Connecting to signaling server...");
-    const socket = io(SIGNALING_URL, { transports: ["websocket", "polling"] });
+    const socket = io(SIGNALING_URL, {
+  transports: ["polling", "websocket"],
+  secure: true
+});
     socketRef.current = socket;
 
     socket.on("connect", () => {
