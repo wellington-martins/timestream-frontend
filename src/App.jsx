@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { io } from "socket.io-client";
 
-// Update this to your live Render backend URL or 'https://signal.timestream.me' once DNS is live
+// Update to your Render backend URL or custom domain
 const SIGNALING_URL = "https://timestream-signal.onrender.com";
 
 const ICE_SERVERS = {
@@ -22,61 +22,56 @@ export default function App() {
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
 
+  // Safe media getter that never hangs on PCs without cameras
   const startMedia = async () => {
-    try {
-      // 1. Try standard camera + microphone
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
-      localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-      return stream;
-    } catch (primaryErr) {
-      console.warn("Camera/Mic not detected. Trying fallback stream...", primaryErr);
-
+    // 1. Try physical webcam + mic
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
-        // 2. Try mic-only if camera is missing
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        localStreamRef.current = audioStream;
-        return audioStream;
-      } catch (audioErr) {
-        console.warn("No mic found either. Creating synthetic video stream for PC...", audioErr);
-
-        // 3. Fallback: Generate a synthetic video track using an HTML Canvas
-        // This allows WebRTC to establish a connection without any physical camera hardware.
-        const canvas = document.createElement("canvas");
-        canvas.width = 320;
-        canvas.height = 240;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#161b22";
-        ctx.fillRect(0, 0, 320, 240);
-        ctx.fillStyle = "#58a6ff";
-        ctx.font = "16px sans-serif";
-        ctx.fillText("Desktop (No Webcam)", 60, 120);
-
-        const syntheticStream = canvas.captureStream(10); // 10 fps synthetic feed
-        localStreamRef.current = syntheticStream;
-        if (localVideoRef.current) localVideoRef.current.srcObject = syntheticStream;
-        return syntheticStream;
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localStreamRef.current = stream;
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+        return stream;
+      } catch (err) {
+        console.warn("No physical camera/mic detected or permission denied. Falling back to synthetic feed...", err);
       }
     }
+
+    // 2. Hardware fallback: generate an HTML5 Canvas video track so the PC can still run WebRTC
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#161b22";
+    ctx.fillRect(0, 0, 320, 240);
+    ctx.fillStyle = "#58a6ff";
+    ctx.font = "16px sans-serif";
+    ctx.fillText("Desktop Viewer (No Camera)", 40, 120);
+
+    const syntheticStream = canvas.captureStream(10);
+    localStreamRef.current = syntheticStream;
+    if (localVideoRef.current) localVideoRef.current.srcObject = syntheticStream;
+    return syntheticStream;
   };
 
-  const createPeerConnection = (stream) => {
+  const getOrCreatePeerConnection = (stream) => {
+    if (peerConnectionRef.current) return peerConnectionRef.current;
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
-    // Add local tracks so the remote peer receives video and audio
-    stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    // Attach local tracks (real or synthetic)
+    if (stream) {
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    }
 
-    // Handle incoming remote media stream
+    // Attach remote stream when peer sends video
     pc.ontrack = (event) => {
+      console.log("Remote track received:", event.streams);
       if (remoteVideoRef.current && event.streams[0]) {
         remoteVideoRef.current.srcObject = event.streams[0];
       }
     };
 
-    // Forward local network routing candidates to peer via relay
+    // Forward ICE routing candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
         socketRef.current.emit("ice-candidate", {
@@ -87,7 +82,8 @@ export default function App() {
     };
 
     pc.oniceconnectionstatechange = () => {
-      setStatus(`ICE Connection: ${pc.iceConnectionState}`);
+      console.log("ICE Connection State:", pc.iceConnectionState);
+      setStatus(`ICE State: ${pc.iceConnectionState}`);
     };
 
     peerConnectionRef.current = pc;
@@ -96,42 +92,46 @@ export default function App() {
 
   const handleJoin = async () => {
     if (!roomId) return;
-    setStatus("Requesting camera and microphone...");
+    setStatus("Initializing stream...");
 
     const stream = await startMedia();
 
-    // Establish WebSocket handshake with signaling relay
+    setStatus("Connecting to signaling server...");
     const socket = io(SIGNALING_URL, { transports: ["websocket", "polling"] });
     socketRef.current = socket;
 
     socket.on("connect", () => {
-      setStatus(`Connected to relay (${socket.id}). Joining room...`);
+      setStatus(`Connected to relay (${socket.id}). Joining ${roomId}...`);
       socket.emit("join-room", roomId);
       setJoined(true);
     });
 
-    // When another device enters room, initiate WebRTC offer
+    socket.on("connect_error", (err) => {
+      setStatus(`Relay connection failed: ${err.message}`);
+    });
+
+    // Initiator flow: when another device joins, send offer
     socket.on("user-joined", async () => {
-      setStatus("Remote peer detected. Generating offer...");
-      const pc = createPeerConnection(stream);
+      setStatus("Peer joined. Creating offer...");
+      const pc = getOrCreatePeerConnection(stream);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       socket.emit("offer", { roomId, offer });
     });
 
-    // When receiving an offer from another device, return an answer
+    // Receiver flow: create answer when receiving offer
     socket.on("offer", async ({ offer }) => {
-      setStatus("Offer received. Creating answer...");
-      const pc = createPeerConnection(stream);
+      setStatus("Offer received. Answering...");
+      const pc = getOrCreatePeerConnection(stream);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       socket.emit("answer", { roomId, answer });
     });
 
-    // When answer arrives back, finalize P2P negotiation
+    // Complete negotiation
     socket.on("answer", async ({ answer }) => {
-      setStatus("Answer received. P2P link active.");
+      setStatus("Answer received. P2P established!");
       if (peerConnectionRef.current) {
         await peerConnectionRef.current.setRemoteDescription(
           new RTCSessionDescription(answer)
@@ -139,7 +139,7 @@ export default function App() {
       }
     });
 
-    // Add incoming ICE candidate routes
+    // Handle ICE candidates
     socket.on("ice-candidate", async ({ candidate }) => {
       if (peerConnectionRef.current) {
         try {
@@ -147,7 +147,7 @@ export default function App() {
             new RTCIceCandidate(candidate)
           );
         } catch (e) {
-          console.error("Failed adding ICE candidate:", e);
+          console.error("ICE error:", e);
         }
       }
     });
@@ -194,13 +194,13 @@ export default function App() {
 
       <div style={{ display: "flex", gap: "20px", flexWrap: "wrap", justifyContent: "center" }}>
         <div>
-          <h3 style={{ marginBottom: "8px" }}>Local Video (You)</h3>
+          <h3 style={{ marginBottom: "8px" }}>Local Stream</h3>
           <video
             ref={localVideoRef}
             autoPlay
             playsInline
             muted
-            style={{ width: "320px", height: "240px", background: "#000", borderRadius: "8px", transform: "scaleX(-1)" }}
+            style={{ width: "320px", height: "240px", background: "#000", borderRadius: "8px", objectFit: "cover" }}
           />
         </div>
         <div>
@@ -209,7 +209,7 @@ export default function App() {
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            style={{ width: "320px", height: "240px", background: "#000", borderRadius: "8px" }}
+            style={{ width: "320px", height: "240px", background: "#000", borderRadius: "8px", objectFit: "cover" }}
           />
         </div>
       </div>
