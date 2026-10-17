@@ -1,5 +1,7 @@
 import React, { useRef, useState, useEffect } from "react";
 import { io } from "socket.io-client";
+import { ethers } from "ethers"; // <-- Added ethers
+import { TIME_TOKEN_ADDRESS, TIME_TOKEN_ABI } from "./web3"; // <-- Added config
 
 // Backend URL on Render
 const SIGNALING_URL = "https://timestream-backend.onrender.com";
@@ -11,18 +13,19 @@ const ICE_SERVERS = {
   ]
 };
 
-// Arbitrum One Network Details
-const ARBITRUM_CHAIN_ID = "0xa4b1"; // 42161 in decimal
+// Updated to Arbitrum Sepolia Testnet
+const ARBITRUM_CHAIN_ID = "0x66eee"; // 421614 in decimal
 const ARBITRUM_PARAMS = {
   chainId: ARBITRUM_CHAIN_ID,
-  chainName: "Arbitrum One",
+  chainName: "Arbitrum Sepolia",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: ["https://arb1.arbitrum.io/rpc"],
-  blockExplorerUrls: ["https://arbiscan.io/"]
+  rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc"],
+  blockExplorerUrls: ["https://sepolia.arbiscan.io/"]
 };
 
 export default function App() {
   const [walletAddress, setWalletAddress] = useState(null);
+  const [tokenBalance, setTokenBalance] = useState("0"); // <-- Added balance state
   const [networkError, setNetworkError] = useState("");
   const [roomId, setRoomId] = useState("room-test");
   const [joined, setJoined] = useState(false);
@@ -68,14 +71,13 @@ export default function App() {
         method: "eth_requestAccounts"
       });
 
-      // Check / Switch to Arbitrum One
+      // Check / Switch to Arbitrum Sepolia
       try {
         await window.ethereum.request({
           method: "wallet_switchEthereumChain",
           params: [{ chainId: ARBITRUM_CHAIN_ID }]
         });
       } catch (switchError) {
-        // Error 4902: chain has not been added to MetaMask
         if (switchError.code === 4902) {
           await window.ethereum.request({
             method: "wallet_addEthereumChain",
@@ -86,14 +88,21 @@ export default function App() {
         }
       }
 
-      setWalletAddress(accounts[0]);
+      const address = accounts[0];
+      setWalletAddress(address);
+
+      // Fetch $TIME balance using ethers
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const contract = new ethers.Contract(TIME_TOKEN_ADDRESS, TIME_TOKEN_ABI, provider);
+      const rawBalance = await contract.balanceOf(address);
+      setTokenBalance(ethers.formatUnits(rawBalance, 18));
+
     } catch (err) {
       console.error(err);
       setNetworkError(err.message || "Failed to connect wallet");
     }
   };
 
-  // Hardware check / Canvas fallback for headless desktop
   const startMedia = async () => {
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
@@ -243,7 +252,35 @@ export default function App() {
     }
   };
 
-  const handleEndCall = () => {
+  // Modified to handle on-chain payment before disconnecting
+  const handleEndCall = async () => {
+    if (callDuration > 0 && walletAddress) {
+      try {
+        setStatus("Settling token payment...");
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        const signer = await provider.getSigner();
+        const contract = new ethers.Contract(TIME_TOKEN_ADDRESS, TIME_TOKEN_ABI, signer);
+
+        // Rate: 1 TIME per 60 seconds
+        const ratePerSecond = ethers.parseUnits("0.016666666666666666", 18);
+        const totalDue = ratePerSecond * BigInt(callDuration);
+
+        if (totalDue > 0n) {
+          // Note: In production, this address will come from your signaling server peer
+          const mockReceiverAddress = "0x000000000000000000000000000000000000dEaD";
+          const tx = await contract.transfer(mockReceiverAddress, totalDue);
+          
+          setStatus("Waiting for payment confirmation...");
+          await tx.wait();
+          alert("Stream paid successfully! Tx: " + tx.hash);
+        }
+      } catch (err) {
+        console.error("Payment failed", err);
+        alert("Payment failed or cancelled by user.");
+      }
+    }
+
+    // Tear down WebRTC and cleanup
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
@@ -257,6 +294,7 @@ export default function App() {
     }
     setIsCallActive(false);
     setJoined(false);
+    setCallDuration(0); // Reset timer
     setStatus("Call Ended");
   };
 
@@ -273,9 +311,12 @@ export default function App() {
       {/* Web3 Wallet Header */}
       <div style={{ marginBottom: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", gap: "8px" }}>
         {walletAddress ? (
-          <div style={{ padding: "8px 16px", background: "#161b22", borderRadius: "20px", border: "1px solid #30363d", display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ height: "10px", width: "10px", borderRadius: "50%", background: "#28a745" }}></span>
-            <span style={{ fontSize: "14px", color: "#58a6ff" }}>Arbitrum: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</span>
+          <div style={{ padding: "8px 16px", background: "#161b22", borderRadius: "20px", border: "1px solid #30363d", display: "flex", flexDirection: "column", alignItems: "center", gap: "4px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ height: "10px", width: "10px", borderRadius: "50%", background: "#28a745" }}></span>
+              <span style={{ fontSize: "14px", color: "#58a6ff" }}>Arbitrum: {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}</span>
+            </div>
+            <span style={{ fontSize: "12px", color: "#fff" }}>Balance: {parseFloat(tokenBalance).toFixed(2)} $TIME</span>
           </div>
         ) : (
           <button
@@ -338,7 +379,7 @@ export default function App() {
             {isVideoMuted ? "Enable Video" : "Disable Video"}
           </button>
           <button onClick={handleEndCall} style={{ padding: "8px 16px", borderRadius: "6px", background: "#da3633", color: "#fff", border: "none", cursor: "pointer", fontWeight: "bold" }}>
-            End Call
+            End Call & Pay
           </button>
         </div>
       )}
